@@ -32,7 +32,7 @@ const char *MQTT_ID    = "xiao-minseo-node-clock";   // 노드 고유 ID
 #define SCR            240                 // 240x240 원형 디스플레이
 #define CX             (SCR / 2)
 #define CY             (SCR / 2)
-#define FAIL_HOLD_MS   3000                // 실패 화면 (retry.c) 3초 표시
+#define FAIL_HOLD_MS   5000                // 실패 화면 (retry.c) 5초 표시
 #define SUCCESS_HOLD_MS 5000               // 성공 화면 (goodjob.c) 5초 표시 후 종료
 #define FRAME_MS       50                  // 20 fps (50ms)
 
