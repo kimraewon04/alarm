@@ -2,14 +2,15 @@
 // Hardware: XIAO ESP32S3 + Seeed Round Display (GC9A01, 240x240)
 // FQBN: esp32:esp32:XIAO_ESP32S3:PSRAM=opi
 // Reference: TFT_eSPI_Clock_ex2 (Sprite double buffering & 8bpp fallback)
-// GitHub: https://github.com/kimraewon04/ei-training-main
+// GitHub: https://github.com/kimraewon04/alarm.git
 //
-// 화면 연동 사양:
-//   - 여백 공간: back.png (back.c) 의 올리브 그린 배경색(0x7426)으로 채움
-//   - start 화면: 글자("STANDBY", "ALARMI") 및 이동 점 애니메이션 제거 -> 순수 start.c 이미지 렌더링
-//   - timer 화면: 중앙에 남은 시간(00:00)만 표출
+// UI 사양:
+//   - 여백 공간: back.png (back.c) 올리브 그린 배경색(0x7426)
+//   - start 화면: 순수 start.c 이미지 렌더링
+//   - timer 화면: timer.c + 중앙 남은 시간(00:00)만 표출
 //   - mission 화면: 지정/랜덤 미션 이미지 (cup.c, mouse.c, phone.c, shake.c, circle.c) + 진행 링
-//   - success / fail 화면: goodjob.c (3초) / retry.c (5초) 순수 이미지 렌더링
+//   - success (goodjob.c): 5초 유지 + 노란색(C_WARN) 외곽 테두리 blink 애니메이션 -> 시스템 종료
+//   - fail (retry.c): 3초 유지 + 파란색(C_ACCENT) 외곽 테두리 blink 애니메이션 -> 미션 재시도
 
 #include <Arduino.h>
 #include <TFT_eSPI.h>
@@ -31,8 +32,8 @@ const char *MQTT_ID    = "xiao-minseo-node-clock";   // 노드 고유 ID
 #define SCR            240                 // 240x240 원형 디스플레이
 #define CX             (SCR / 2)
 #define CY             (SCR / 2)
-#define FAIL_HOLD_MS   5000                // 실패 화면 (retry.c) 5초 지연 표시
-#define SUCCESS_HOLD_MS 3000               // 성공 화면 (goodjob.c) 3초 표시 후 종료
+#define FAIL_HOLD_MS   3000                // 실패 화면 (retry.c) 3초 표시
+#define SUCCESS_HOLD_MS 5000               // 성공 화면 (goodjob.c) 5초 표시 후 종료
 #define FRAME_MS       50                  // 20 fps (50ms)
 
 #define minimum(a, b)  (((a) < (b)) ? (a) : (b))
@@ -44,7 +45,7 @@ const char *MQTT_ID    = "xiao-minseo-node-clock";   // 노드 고유 ID
 #define C_TXT      TFT_WHITE
 #define C_ACCENT   0x455F              // Cyan Blue
 #define C_OK       0x3606              // Emerald Green
-#define C_WARN     0xFDA6              // Amber Orange
+#define C_WARN     0xFDA6              // Amber Orange / Yellow
 #define C_FAIL     0xF9E7              // Vivid Red
 
 TFT_eSPI  tft = TFT_eSPI();
@@ -61,7 +62,7 @@ static char     mIcon[16]   = "";       // 아이콘 이름 (swing / spin / mous
 static char     mKind[16]   = "";       // gesture | object
 static uint32_t armedMs     = 0;        // ARMED 진입 시각 (millis)
 static uint32_t armedTotal  = 0;        // 카운트다운 총 ms
-static uint32_t holdUntil   = 0;        // 특수 화면(retry 5s / goodjob 3s) 유효 완료 시각
+static uint32_t holdUntil   = 0;        // 특수 화면(retry 3s / goodjob 5s) 유효 완료 시각
 static St       pendingSt   = S_IDLE;   // 지연 화면 종료 후 전환할 상태
 static uint32_t heldMs      = 0, needMs = 3000;   // ui 진행 링
 static uint32_t lastUi      = 0;        // ui 타임아웃 (2초 초과 시 링 감춤)
@@ -170,7 +171,7 @@ static void bigTime(uint32_t ms, int y, uint16_t c) {
 }
 
 // ---- Render Screens ----
-// 1. Idle (Power On / Standby) -> start.c ONLY (No text, no dot)
+// 1. Idle (Power On / Standby) -> start.c ONLY
 static void screenIdle(uint32_t now) {
   loadBackgroundJpeg(start_map, 9093);
 }
@@ -188,7 +189,7 @@ static void screenArmed(uint32_t now) {
   bigTime(left, CY, C_TXT);
 }
 
-// 3. Ringing (Alarm Firing) -> timer.c + Flash Border
+// 3. Ringing (Alarm Firing) -> timer.c + Red Flash Border
 static void screenRinging(uint32_t now) {
   loadBackgroundJpeg(timer_map, 12140);
   bool on = (now / 350) % 2;
@@ -197,12 +198,11 @@ static void screenRinging(uint32_t now) {
 
 // 4. Mission (Random/Assigned Image + Progress Ring)
 static void screenMission(uint32_t now) {
-  // Load background JPEG matching icon/label
   if (!strcmp(mIcon, "cup") || !strcmp(mLabel, "cup")) {
     loadBackgroundJpeg(cup_map, 18816);
   } else if (!strcmp(mIcon, "mouse") || !strcmp(mLabel, "mouse")) {
     loadBackgroundJpeg(mouse_map, 21970);
-  } else if (!strcmp(mIcon, "phone") || !strcmp(mLabel, "phone")) {
+  } else if (!strcmp(mIcon, "phone") || !strcmp(mLabel, "phonecase") || !strcmp(mLabel, "phone")) {
     loadBackgroundJpeg(phone_map, 24128);
   } else if (!strcmp(mIcon, "shake") || !strcmp(mIcon, "swing") || !strcmp(mLabel, "shaking")) {
     loadBackgroundJpeg(shake_map, 34503);
@@ -221,14 +221,18 @@ static void screenMission(uint32_t now) {
     spr.drawSmoothArc(CX, CY, 116, 108, 0, deg, deg >= 359 ? C_OK : C_WARN, C_BG, true);
 }
 
-// 5. Fail -> retry.c (Held for 5s)
+// 5. Fail -> retry.c (Held for 3s + Blue Blink Border)
 static void screenFail(uint32_t now) {
   loadBackgroundJpeg(retry_map, 41217);
+  bool on = (now / 350) % 2;
+  spr.drawSmoothArc(CX, CY, 114, 106, 0, 359, on ? C_ACCENT : C_DIM, C_BG);
 }
 
-// 6. Success -> goodjob.c (Held for 3s then Shutdown)
+// 6. Success -> goodjob.c (Held for 5s + Yellow Blink Border -> Shutdown)
 static void screenSuccess(uint32_t now) {
   loadBackgroundJpeg(goodjob_map, 39457);
+  bool on = (now / 350) % 2;
+  spr.drawSmoothArc(CX, CY, 114, 106, 0, 359, on ? C_WARN : C_DIM, C_BG);
 }
 
 // 7. Shutdown
@@ -239,7 +243,7 @@ static void screenShutdown() {
 static void render() {
   uint32_t now = millis();
 
-  // Hold timer check (Retry 5s / Goodjob 3s)
+  // Hold timer check (Retry 3s / Goodjob 5s)
   if (holdUntil && now >= holdUntil) {
     holdUntil = 0;
     st = pendingSt;
@@ -308,13 +312,13 @@ void onMqtt(char *topic, byte *payload, unsigned int len) {
     heldMs = 0;
     setState(S_MISSION);
   } else if (!strcmp(state, "fail")) {
-    // Fail: display retry.c for 5 seconds (5000ms), then return to mission retry
+    // Fail: display retry.c for 3 seconds (3000ms), then return to mission retry
     st = S_FAIL;
     pendingSt = S_MISSION;
     holdUntil = millis() + FAIL_HOLD_MS;
     heldMs = 0;
   } else if (!strcmp(state, "success")) {
-    // Success: display goodjob.c for 3 seconds (3000ms), then shutdown
+    // Success: display goodjob.c for 5 seconds (5000ms), then shutdown
     st = S_SUCCESS;
     pendingSt = S_SHUTDOWN;
     holdUntil = millis() + SUCCESS_HOLD_MS;
@@ -351,7 +355,6 @@ void setup() {
   delay(200);
   Serial.println("\n==== alarmi CLOCK NODE ====");
 
-  // 백라이트 전원 켜기 (Seeed Round Display: D6 / GPIO 43)
 #ifdef D6
   pinMode(D6, OUTPUT);
   digitalWrite(D6, HIGH);
@@ -375,7 +378,6 @@ void setup() {
   }
   spr.fillSprite(C_BG);
 
-  // 부팅 즉시 start.c 화면 렌더링
   render();
 
   WiFi.mode(WIFI_STA);
